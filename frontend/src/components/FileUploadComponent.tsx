@@ -23,8 +23,11 @@ export const FileUploadComponent: React.FC<FileUploadComponentProps> = ({
     if (acceptedFiles.length === 0) return;
 
     const file = acceptedFiles[0];
-    if (!file.name.endsWith('.csv')) {
-      setError('Please upload a CSV file');
+    const validExtensions = ['.csv', '.json', '.tsv'];
+    const isValidFile = validExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
+
+    if (!isValidFile) {
+      setError('Please upload a CSV, JSON, or TSV file');
       return;
     }
 
@@ -54,7 +57,9 @@ export const FileUploadComponent: React.FC<FileUploadComponentProps> = ({
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'text/csv': ['.csv']
+      'text/csv': ['.csv'],
+      'application/json': ['.json'],
+      'text/tab-separated-values': ['.tsv']
     }
   });
 
@@ -72,17 +77,17 @@ export const FileUploadComponent: React.FC<FileUploadComponentProps> = ({
         {loading ? (
           <>
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto"></div>
-            <p className="text-gray-600">Uploading and parsing CSV...</p>
+            <p className="text-gray-600">Uploading and parsing file...</p>
           </>
         ) : isDragActive ? (
           <>
-            <p className="text-lg font-semibold text-blue-600">Drop the CSV file here</p>
-            <p className="text-sm text-blue-500">The file will be uploaded immediately</p>
+            <p className="text-lg font-semibold text-blue-600">Drop the file here</p>
+            <p className="text-sm text-blue-500">CSV, JSON, or TSV file will be uploaded immediately</p>
           </>
         ) : (
           <>
-            <p className="text-lg font-semibold text-gray-700">Drag and drop a CSV file here</p>
-            <p className="text-sm text-gray-500">or click to select a file</p>
+            <p className="text-lg font-semibold text-gray-700">Drag and drop a data file here</p>
+            <p className="text-sm text-gray-500">CSV, JSON, or TSV • or click to select</p>
           </>
         )}
       </div>

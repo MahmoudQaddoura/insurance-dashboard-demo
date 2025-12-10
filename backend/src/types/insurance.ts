@@ -1,25 +1,16 @@
-export interface InsuranceClaim {
-  index: number;
-  PatientID: number;
-  age: number | null;
-  gender: string;
-  bmi: number;
-  bloodpressure: number;
-  diabetic: boolean;
-  children: number;
-  smoker: boolean;
-  region: string;
-  claim: number;
+export interface DataRow {
+  [key: string]: string | number | boolean | null;
 }
 
 export interface ColumnMetadata {
   name: string;
-  type: 'number' | 'string' | 'boolean';
+  type: 'string' | 'number' | 'boolean' | 'mixed';
   nullable: boolean;
 }
 
 export interface ParsedDataset {
-  data: InsuranceClaim[];
+  data: DataRow[];
   metadata: ColumnMetadata[];
   rowCount: number;
+  columns: string[];
 }

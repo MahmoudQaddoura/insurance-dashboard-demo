@@ -2,57 +2,104 @@ import { Router, Request, Response } from 'express';
 import multer, { Multer } from 'multer';
 import csv from 'csv-parser';
 import { Readable } from 'stream';
-import { InsuranceClaim, ParsedDataset, ColumnMetadata } from '../types/insurance';
+import { DataRow, ParsedDataset, ColumnMetadata } from '../types/insurance';
 
 const router = Router();
 const upload: Multer = multer({ storage: multer.memoryStorage() });
 
-const EXPECTED_COLUMNS = [
-  'index',
-  'PatientID',
-  'age',
-  'gender',
-  'bmi',
-  'bloodpressure',
-  'diabetic',
-  'children',
-  'smoker',
-  'region',
-  'claim'
-];
-
-const BOOLEAN_COLUMNS = new Set(['diabetic', 'smoker']);
-const NUMERIC_COLUMNS = new Set(['index', 'PatientID', 'age', 'bmi', 'bloodpressure', 'children', 'claim']);
-
-function parseBoolean(value: string): boolean {
-  return value.toLowerCase() === 'yes';
+function detectFileType(filename: string): 'csv' | 'json' | 'tsv' {
+  if (filename.endsWith('.json')) return 'json';
+  if (filename.endsWith('.tsv')) return 'tsv';
+  return 'csv';
 }
 
-function convertToNumber(value: string, columnName: string): number | null {
-  if (columnName === 'age' && value.trim() === '') {
-    return null;
-  }
-  const num = parseFloat(value);
-  return isNaN(num) ? null : num;
-}
+function inferColumnTypes(data: DataRow[], columns: string[]): ColumnMetadata[] {
+  return columns.map(col => {
+    const samples = data.slice(0, 100).map(row => row[col]);
+    const nonNullSamples = samples.filter(v => v !== null && v !== undefined && v !== '');
 
-function generateColumnMetadata(): ColumnMetadata[] {
-  return [
-    { name: 'index', type: 'number', nullable: false },
-    { name: 'PatientID', type: 'number', nullable: false },
-    { name: 'age', type: 'number', nullable: true },
-    { name: 'gender', type: 'string', nullable: false },
-    { name: 'bmi', type: 'number', nullable: false },
-    { name: 'bloodpressure', type: 'number', nullable: false },
-    { name: 'diabetic', type: 'boolean', nullable: false },
-    { name: 'children', type: 'number', nullable: false },
-    { name: 'smoker', type: 'boolean', nullable: false },
-    { name: 'region', type: 'string', nullable: true },
-    { name: 'claim', type: 'number', nullable: false }
-  ];
-}
+    let type: 'string' | 'number' | 'boolean' | 'mixed' = 'string';
+    let hasNumbers = 0;
+    let hasBooleans = 0;
+    let hasStrings = 0;
 
+    nonNullSamples.forEach(val => {
+      const strVal = String(val).toLowerCase().trim();
+      if (strVal === 'true' || strVal === 'false' || strVal === 'yes' || strVal === 'no') {
+        hasBooleans++;
+      } else if (!isNaN(parseFloat(strVal)) && isFinite(Number(strVal))) {
+        hasNumbers++;
+      } else {
+        hasStrings++;
+      }
+    });
+
+    if (hasBooleans > nonNullSamples.length * 0.8) {
+      type = 'boolean';
+    } else if (hasNumbers > nonNullSamples.length * 0.8) {
+      type = 'number';
+    } else if (hasStrings > nonNullSamples.length * 0.8) {
+      type = 'string';
+    } else {
+      type = 'mixed';
+    }
+
+    const nullable = samples.some(v => v === null || v === undefined || v === '');
+    return { name: col, type, nullable };
+  });
+}
 let cachedDataset: ParsedDataset | null = null;
+
+async function parseCSV(buffer: Buffer): Promise<DataRow[]> {
+  return new Promise((resolve, reject) => {
+    const fileStream = Readable.from([buffer]);
+    const data: DataRow[] = [];
+
+    fileStream
+      .pipe(csv())
+      .on('data', (row: DataRow) => {
+        data.push(row);
+      })
+      .on('end', () => resolve(data))
+      .on('error', reject);
+  });
+}
+
+async function parseTSV(buffer: Buffer): Promise<DataRow[]> {
+  return new Promise((resolve, reject) => {
+    const fileStream = Readable.from([buffer]);
+    const data: DataRow[] = [];
+
+    fileStream
+      .pipe(csv({ separator: '\t' }))
+      .on('data', (row: DataRow) => {
+        data.push(row);
+      })
+      .on('end', () => resolve(data))
+      .on('error', reject);
+  });
+}
+
+function parseJSON(buffer: Buffer): DataRow[] {
+  const text = buffer.toString('utf-8');
+  const parsed = JSON.parse(text);
+
+  if (Array.isArray(parsed)) {
+    return parsed.map(item => {
+      if (typeof item === 'object' && item !== null) {
+        return item as DataRow;
+      }
+      return { value: item } as DataRow;
+    });
+  } else if (typeof parsed === 'object' && parsed !== null) {
+    return Object.entries(parsed).map(([key, value]) => ({
+      key,
+      value: value as string | number | boolean | null
+    }));
+  }
+
+  throw new Error('Invalid JSON format. Expected array or object.');
+}
 
 router.post('/upload', upload.single('file'), async (req: Request, res: Response): Promise<void> => {
   try {
@@ -61,48 +108,30 @@ router.post('/upload', upload.single('file'), async (req: Request, res: Response
       return;
     }
 
-    const fileStream = Readable.from([req.file.buffer]);
-    const data: InsuranceClaim[] = [];
-    let headers: string[] = [];
+    const fileType = detectFileType(req.file.originalname);
+    let data: DataRow[] = [];
 
-    await new Promise<void>((resolve, reject) => {
-      fileStream
-        .pipe(csv())
-        .on('headers', (parsedHeaders: string[]) => {
-          headers = parsedHeaders;
-          const missingColumns = EXPECTED_COLUMNS.filter(col => !headers.includes(col));
-          if (missingColumns.length > 0) {
-            reject(new Error(`Missing columns: ${missingColumns.join(', ')}`));
-          }
-        })
-        .on('data', (row: any) => {
-          try {
-            const claim: InsuranceClaim = {
-              index: parseInt(row.index, 10),
-              PatientID: parseInt(row.PatientID, 10),
-              age: convertToNumber(row.age, 'age'),
-              gender: row.gender.toLowerCase(),
-              bmi: parseFloat(row.bmi),
-              bloodpressure: parseInt(row.bloodpressure, 10),
-              diabetic: parseBoolean(row.diabetic),
-              children: parseInt(row.children, 10),
-              smoker: parseBoolean(row.smoker),
-              region: row.region || 'unknown',
-              claim: parseFloat(row.claim)
-            };
-            data.push(claim);
-          } catch (error) {
-            reject(new Error(`Error parsing row: ${(error as Error).message}`));
-          }
-        })
-        .on('end', resolve)
-        .on('error', reject);
-    });
+    if (fileType === 'json') {
+      data = parseJSON(req.file.buffer);
+    } else if (fileType === 'tsv') {
+      data = await parseTSV(req.file.buffer);
+    } else {
+      data = await parseCSV(req.file.buffer);
+    }
+
+    if (data.length === 0) {
+      res.status(400).json({ error: 'File is empty or contains no valid data' });
+      return;
+    }
+
+    const columns = Object.keys(data[0]);
+    const metadata = inferColumnTypes(data, columns);
 
     cachedDataset = {
       data,
-      metadata: generateColumnMetadata(),
-      rowCount: data.length
+      metadata,
+      rowCount: data.length,
+      columns
     };
 
     res.json({
@@ -111,14 +140,14 @@ router.post('/upload', upload.single('file'), async (req: Request, res: Response
     });
   } catch (error) {
     res.status(400).json({
-      error: `CSV parsing failed: ${(error as Error).message}`
+      error: `File parsing failed: ${(error as Error).message}`
     });
   }
 });
 
 router.get('/dataset', (req: Request, res: Response): void => {
   if (!cachedDataset) {
-    res.status(404).json({ error: 'No dataset loaded. Please upload a CSV file first.' });
+    res.status(404).json({ error: 'No dataset loaded. Please upload a file first.' });
     return;
   }
   res.json(cachedDataset);
